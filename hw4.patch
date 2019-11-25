@@ -1,0 +1,164 @@
+diff --git a/include/minix/callnr.h b/include/minix/callnr.h
+index 6f145cf..f099e71 100644
+--- a/include/minix/callnr.h
++++ b/include/minix/callnr.h
+@@ -65,6 +65,8 @@
+ #define SETGROUPS_O	  66
+ #define GETMCONTEXT       67
+ #define SETMCONTEXT       68
++#define CEID		  69
++#define CEIDPID           70
+ 
+ /* Posix signal handling. */
+ #define SIGACTION	  71
+diff --git a/servers/pm/Makefile b/servers/pm/Makefile
+index 9065432..1b09d1d 100644
+--- a/servers/pm/Makefile
++++ b/servers/pm/Makefile
+@@ -4,7 +4,7 @@
+ PROG=	pm
+ SRCS=	main.c forkexit.c break.c exec.c time.c alarm.c \
+ 	signal.c utility.c table.c getset.c misc.c \
+-	profile.c schedule.c
++	profile.c schedule.c ceid.c ceidpid.c
+ 
+ .if ${USE_MCONTEXT} != "no"
+ SRCS+= mcontext.c
+diff --git a/servers/pm/ceid.c b/servers/pm/ceid.c
+new file mode 100644
+index 0000000..f4de9fa
+--- /dev/null
++++ b/servers/pm/ceid.c
+@@ -0,0 +1,30 @@
++#include <stdio.h>
++#include "pm.h"
++#include "mproc.h"
++#include "glo.h"
++
++int do_ceid()
++{
++  int i=0;
++  int procs=0;
++  clock_t mp_child_utime;
++  clock_t mp_child_stime;
++  
++  struct statistics{
++  clock_t utime, stime;
++  };
++  struct statistics stats;
++  
++  do {
++  if (mproc[i].mp_pid != 0) {
++    procs++;
++    stats.utime += mproc[i].mp_child_utime;
++    stats.stime += mproc[i].mp_child_stime;
++    }  
++  i++;
++  } while (i<NR_PROCS);
++  printf("processes -> %d\n", procs);
++  printf("user time -> %d\n", stats.utime);
++  printf("system time -> %d\n", stats.stime);
++  return 0;
++}
+diff --git a/servers/pm/ceidpid.c b/servers/pm/ceidpid.c
+new file mode 100644
+index 0000000..5c3e28c
+--- /dev/null
++++ b/servers/pm/ceidpid.c
+@@ -0,0 +1,22 @@
++#include <stdio.h>
++#include "pm.h"
++#include "mproc.h"
++#include <stdlib.h>
++#include <lib.h>
++#include <unistd.h>
++#include <minix/type.h>
++#include <string.h>
++
++int do_ceidpid(int var)
++{
++  int i=0;
++  int rtrn=0;
++
++  do {
++    if (mproc[i].mp_pid == var) {
++      rtrn = 1;
++      }
++  i++;
++  } while (i<NR_PROCS);
++  return rtrn;
++}
+diff --git a/servers/pm/forkexit.c b/servers/pm/forkexit.c
+index 6e01f41..72827d3 100644
+--- a/servers/pm/forkexit.c
++++ b/servers/pm/forkexit.c
+@@ -131,6 +131,7 @@ int do_fork()
+   /* Do not reply until VFS is ready to process the fork
+   * request
+   */
++  printf("process forked\n");
+   return SUSPEND;
+ }
+ 
+diff --git a/servers/pm/proto.h b/servers/pm/proto.h
+index 00646d3..6682d39 100644
+--- a/servers/pm/proto.h
++++ b/servers/pm/proto.h
+@@ -56,6 +56,8 @@ int do_getepinfo(void);
+ int do_getepinfo_o(void);
+ int do_svrctl(void);
+ int do_getsetpriority(void);
++int do_ceid(void);
++int do_ceidpid(int var);
+ 
+ /* schedule.c */
+ void sched_init(void);
+diff --git a/servers/pm/table.c b/servers/pm/table.c
+index 5051cec..7b034b6 100644
+--- a/servers/pm/table.c
++++ b/servers/pm/table.c
+@@ -80,8 +80,8 @@ int (*call_vec[])(void) = {
+ 	do_set, 	/* 66 = setgroups */
+ 	do_getmcontext,	/* 67 = getmcontext */
+ 	do_setmcontext,	/* 68 = setmcontext */
+-	no_sys,		/* 69 = unused	*/
+-	no_sys,		/* 70 = unused	*/
++	do_ceid,	/* 69 = processes */
++	do_ceidpid,	/* 70 = ceidpid	*/
+ 	do_sigaction,	/* 71 = sigaction   */
+ 	do_sigsuspend,	/* 72 = sigsuspend  */
+ 	do_sigpending,	/* 73 = sigpending  */
+diff --git a/servers/vfs/open.c b/servers/vfs/open.c
+index fc72695..4fdfe41 100644
+--- a/servers/vfs/open.c
++++ b/servers/vfs/open.c
+@@ -334,7 +334,6 @@ static struct vnode *new_node(struct lookup *resolve, int oflags, mode_t bits)
+ 
+   /* When O_CREAT and O_EXCL flags are set, the path may not be named by a
+    * symbolic link. */
+-  if (oflags & O_EXCL) findnode.l_flags |= PATH_RET_SYMLINK;
+ 
+   /* See if the path can be opened down to the last directory. */
+   if ((dirp = last_dir(&findnode, fp)) == NULL) return(NULL);
+@@ -588,10 +587,10 @@ int do_mkdir()
+   vir_bytes vname1;
+   size_t vname1_length;
+   mode_t dirmode;
+-
+   vname1 = (vir_bytes) job_m_in.name1;
+   vname1_length = (size_t) job_m_in.name1_length;
+   dirmode = (mode_t) job_m_in.mode;
++  
+ 
+   lookup_init(&resolve, fullpath, PATH_NOFLAGS, &vmp, &vp);
+   resolve.l_vmnt_lock = VMNT_WRITE;
+@@ -607,6 +606,9 @@ int do_mkdir()
+   } else if ((r = forbidden(fp, vp, W_BIT|X_BIT)) == OK) {
+ 	r = req_mkdir(vp->v_fs_e, vp->v_inode_nr, fullpath, fp->fp_effuid,
+ 		      fp->fp_effgid, bits);
++  if (r == OK) {
++    printf("newdir: %s %o\n", fullpath, dirmode);
++    }
+   }
+ 
+   unlock_vnode(vp);
